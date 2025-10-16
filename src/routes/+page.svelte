@@ -1,124 +1,122 @@
-<script>
-	import { GripVertical, Plus, X } from '@lucide/svelte';
+<script lang="ts">
+	import { setValue } from '$lib/kv.remote';
+	import { KEY, type Todo } from '$lib/todos';
+	import GripVertical from '@lucide/svelte/icons/grip-vertical';
+	import Plus from '@lucide/svelte/icons/plus';
+	import X from '@lucide/svelte/icons/x';
+	import isEqual from 'lodash-es/isEqual';
 	import { flip } from 'svelte/animate';
 	import { quintOut } from 'svelte/easing';
 
-	// Load from localStorage or use defaults
-	const loadStrips = () => {
-		if (typeof localStorage !== 'undefined') {
-			const saved = localStorage.getItem('atc-strips');
-			if (saved) {
-				try {
-					return JSON.parse(saved);
-				} catch (e) {
-					console.error('Failed to parse saved strips:', e);
-				}
-			}
-		}
-		return [
-			{ id: 1, text: 'Review pull request #234', status: 'normal', pullout: 0 },
-			{ id: 2, text: 'Update documentation for API v2', status: 'normal', pullout: 0 },
-			{ id: 3, text: 'Fix bug in user authentication flow', status: 'pulled', pullout: 20 },
-			{ id: 4, text: 'Meeting with design team at 2pm', status: 'normal', pullout: 0 },
-			{ id: 5, text: 'Refactor database query optimizer', status: 'pulled', pullout: 35 }
-		];
+	const { data } = $props();
+	const save = async (toSave: Todo[]) => {
+		await setValue({ key: KEY, value: toSave });
 	};
 
-	let strips = $state(loadStrips());
+	let strips = $state(data.todos!);
+
 	let newTaskText = $state('');
-	let draggingId = $state(null);
-	let dropTarget = $state(null);
 
-	function dropSlotClasses(targetId) {
-		let heightClass = 'h-0';
-		let marginClass = 'my-0';
-		let emphasisClasses = '';
+	// Index of the dragged item (source index in the *original* array)
+	let draggedIndex = $state(null);
 
-		if (draggingId !== null) {
-			heightClass = 'h-2';
-			marginClass = 'my-1';
-		}
+	// Insertion *slot* in [0, strips.length]. Example:
+	//   0 -> before first item, 1 -> between 0 and 1, ..., strips.length -> append at end
+	let dragOverIndex = $state(null);
 
-		if (dropTarget === targetId && draggingId !== null) {
-			heightClass = 'h-11';
-			marginClass = 'my-3';
-			emphasisClasses = 'border-blue-500/60 bg-blue-500/10';
-		}
+	// Reference to the list container
+	let listEl: HTMLElement;
 
-		return `w-full rounded-xl border border-dashed border-transparent bg-transparent transition-all duration-150 ease-out ${heightClass} ${marginClass} ${emphasisClasses}`;
-	}
-
-	// Persist to localStorage whenever strips change
+	let oldStrips = [] as Todo[];
 	$effect(() => {
-		if (typeof localStorage !== 'undefined') {
-			localStorage.setItem('atc-strips', JSON.stringify(strips));
-		}
+		if (isEqual(oldStrips, strips)) return;
+
+		save(strips);
+		oldStrips = strips;
 	});
 
-	function handleDragStart(e, id) {
-		draggingId = id;
-		dropTarget = id;
-		e.dataTransfer.effectAllowed = 'move';
-		e.dataTransfer.setData('text/plain', String(id));
-}
+	function handleDragStart(e, index) {
+		draggedIndex = index;
+	}
 
 	function handleDragEnd() {
-		resetDragState();
-}
+		draggedIndex = null;
+		dragOverIndex = null;
+	}
 
-	function handleDragOver(e) {
+	// Called when dragging over a specific item; compute insertion slot using midpoint
+	function handleDragOverItem(e, index) {
 		e.preventDefault();
-		if (draggingId === null) return;
-		e.dataTransfer.dropEffect = 'move';
-}
+		if (draggedIndex === null) return;
 
-	function handleDrop(e, targetId) {
+		const rect = e.currentTarget.getBoundingClientRect();
+		const offsetY = e.clientY - rect.top;
+		const before = offsetY < rect.height / 2;
+
+		// insertion index: before ? index : index + 1
+		dragOverIndex = Math.max(0, Math.min(strips.length, before ? index : index + 1));
+	}
+
+	// Called when dragging over the list container (e.g., gaps or end of list)
+	function handleDragOverContainer(e) {
 		e.preventDefault();
-		if (draggingId === null) {
-			resetDragState();
+		if (draggedIndex === null) return;
+
+		const r = listEl.getBoundingClientRect();
+		// If pointer is above or below, clamp to edges
+		if (e.clientY < r.top) {
+			dragOverIndex = 0;
+			return;
+		}
+		if (e.clientY > r.bottom) {
+			dragOverIndex = strips.length;
 			return;
 		}
 
-		const destination = targetId ?? dropTarget ?? 'end';
-		reorderStrips(draggingId, destination);
-		resetDragState();
-	}
-
-	function handleDragEnter(targetId) {
-		if (draggingId === null) return;
-		dropTarget = targetId;
-	}
-
-	function handleDragLeave(targetId) {
-		if (dropTarget === targetId) {
-			dropTarget = null;
-		}
-}
-
-	function reorderStrips(sourceId, targetId) {
-		const currentIndex = strips.findIndex((strip) => strip.id === sourceId);
-		if (currentIndex === -1) return;
-
-		const destinationIndex =
-			targetId === 'end' ? strips.length : strips.findIndex((strip) => strip.id === targetId);
-		if (destinationIndex === -1 && targetId !== 'end') return;
-
-		const updated = [...strips];
-		const [moved] = updated.splice(currentIndex, 1);
-
-		if (targetId === 'end') {
-			updated.push(moved);
-		} else {
-			const insertIndex = destinationIndex > currentIndex ? destinationIndex - 1 : destinationIndex;
-			updated.splice(insertIndex, 0, moved);
+		// Compute slot based on midpoints of children to cover gaps/end reliably
+		const children = Array.from(listEl.children);
+		if (children.length === 0) {
+			dragOverIndex = 0;
+			return;
 		}
 
-		strips = updated;
+		let slot = 0;
+		for (let i = 0; i < children.length; i += 1) {
+			const rect = (children[i] as HTMLElement).getBoundingClientRect();
+			const mid = rect.top + rect.height / 2;
+			if (e.clientY < mid) {
+				slot = i;
+				break;
+			}
+			slot = i + 1; // default to after this item
+		}
+
+		dragOverIndex = Math.max(0, Math.min(children.length, slot));
 	}
 
-	function resetDragState() {
-		draggingId = null;
-		dropTarget = null;
+	function handleDrop(e) {
+		e.preventDefault();
+
+		if (draggedIndex === null || dragOverIndex === null) {
+			return handleDragEnd();
+		}
+
+		// No-op if dropping into the same place
+		if (dragOverIndex === draggedIndex || dragOverIndex === draggedIndex + 1) {
+			return handleDragEnd();
+		}
+
+		const next = [...strips];
+		const [moved] = next.splice(draggedIndex, 1);
+
+		// If we remove an earlier index and insert after it, the insertion slot shifts by -1
+		let to = dragOverIndex;
+		if (draggedIndex < dragOverIndex) to -= 1;
+
+		next.splice(to, 0, moved);
+		strips = next;
+
+		handleDragEnd();
 	}
 
 	function togglePullout(id) {
@@ -187,34 +185,28 @@
 
 		<!-- Bay holder -->
 		<div class="rounded-lg border border-slate-700 bg-slate-800 p-4 shadow-2xl">
-			<div class="space-y-2">
-				{#snippet dropSlot(targetId)}
-					<div
-						class={dropSlotClasses(targetId)}
-						ondragenter={() => handleDragEnter(targetId)}
-						ondragover={handleDragOver}
-						ondragleave={() => handleDragLeave(targetId)}
-						ondrop={(event) => handleDrop(event, targetId)}
-					></div>
-				{/snippet}
-
-				{#each strips as strip (strip.id)}
-					{@render dropSlot(strip.id)}
-
+			<!-- List container is also a drop target so dropping at the end works -->
+			<div
+				class="space-y-2"
+				bind:this={listEl}
+				data-testid="strip-list"
+				ondragover={handleDragOverContainer}
+				ondrop={handleDrop}
+			>
+				{#each strips as strip, index (strip.id)}
 					<div
 						draggable="true"
-						data-strip-id={strip.id}
-						ondragstart={(e) => handleDragStart(e, strip.id)}
+						ondragstart={(e) => handleDragStart(e, index)}
 						ondragend={handleDragEnd}
-						ondragenter={() => handleDragEnter(strip.id)}
-						ondragover={handleDragOver}
-						ondrop={(e) => handleDrop(e, strip.id)}
+						ondragover={(e) => handleDragOverItem(e, index)}
 						class="relative select-none"
-						style="
-              transform: translateX({strip.pullout}px);
-              opacity: {draggingId === strip.id ? 0.4 : 1};
-              transition: transform 0.2s ease-out, opacity 0.15s ease-out;
-            "
+						data-testid="task-strip"
+						data-task-id={strip.id}
+						style:transform="translateX({strip.pullout}px)"
+						style:opacity={draggedIndex === index ? 0.4 : 1}
+						style:margin-top={dragOverIndex === index ? '4rem' : '0'}
+						style:margin-bottom={dragOverIndex === index + 1 ? '4rem' : '0'}
+						style:transition="transform 0.2s ease-out, opacity 0.15s ease-out, margin 0.2s ease-out"
 						animate:flip={{ duration: 300, easing: quintOut }}
 					>
 						<div
@@ -222,7 +214,7 @@
               {strip.status === 'pulled'
 								? 'border-2 border-amber-500/50 bg-amber-500/20'
 								: 'border-2 border-slate-600 bg-slate-700'}
-              {dropTarget === strip.id && draggingId !== null
+              {(dragOverIndex === index || dragOverIndex === index + 1) && draggedIndex !== index
 								? 'border-blue-500'
 								: 'hover:border-slate-500'}"
 						>
@@ -259,8 +251,6 @@
 						</div>
 					</div>
 				{/each}
-
-				{@render dropSlot('end')}
 			</div>
 		</div>
 
